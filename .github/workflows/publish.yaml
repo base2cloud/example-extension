@@ -20,5 +20,8 @@ jobs:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
           service_account: ${{ vars.WIF_SA_EMAIL }}
 
+      - name: Set up gcloud CLI
+        uses: google-github-actions/setup-gcloud@v3
+
       - name: Confirm authentication
         run: gcloud auth list
