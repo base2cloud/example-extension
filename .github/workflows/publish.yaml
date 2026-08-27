@@ -21,7 +21,7 @@ jobs:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
           service_account: ${{ vars.WIF_SA_EMAIL }}
           token_format: access_token
-          scopes: https://www.googleapis.com/auth/chromewebstore
+          access_token_scopes: https://www.googleapis.com/auth/chromewebstore
 
       - name: Zip extension
         run: |
