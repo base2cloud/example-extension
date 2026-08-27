@@ -1,73 +1,219 @@
-name: Publish
+name: Publish to Chrome Web Store
+
+# Uploads the extension using the Chrome Web Store v2 API, authenticating with a
+# short-lived access token minted through GCP Workload Identity Federation.
+#
+# There are no static credentials anywhere in this workflow: no OAuth client id,
+# no client secret, no refresh token, no service account key. GitHub proves its
+# identity with an OIDC token, GCP exchanges it for a token scoped to
+# chromewebstore, and CWS accepts that directly.
 
 on:
   workflow_dispatch:
+    inputs:
+      submit_for_review:
+        description: "Submit the uploaded draft for review (staged publish)"
+        type: boolean
+        default: false
 
 permissions:
-  id-token: write
   contents: read
+  id-token: write # mint the OIDC token that WIF exchanges; nothing works without it
+
+concurrency:
+  group: cws-publish
+  cancel-in-progress: false # never abort a run mid-upload
 
 jobs:
   publish:
+    name: Upload to CWS
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # Mandatory, and load-bearing twice over.
+    #
+    # The WIF provider requires assertion.environment == "prd". A job without
+    # this key produces a token with no environment claim, and GCP refuses the
+    # exchange. It is also what routes the run through the required-reviewer
+    # gate, so removing it to "fix" a failure would remove the approval step —
+    # which is exactly why the condition checks for it.
+    environment: prd
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Authenticate to GCP via WIF
-        uses: google-github-actions/auth@v2
+      - name: Read manifest version
+        id: manifest
+        run: |
+          set -euo pipefail
+          VERSION=$(jq -r '.version' extension/manifest.json)
+          # CWS accepts 1-4 dot-separated integers, each 0-65535. Semver
+          # pre-release suffixes are rejected at upload, so fail early here
+          # rather than after a pointless round trip.
+          if [[ ! "${VERSION}" =~ ^[0-9]+(\.[0-9]+){0,3}$ ]]; then
+            echo "::error::Invalid manifest version '${VERSION}' - expected 1-4 dot-separated integers"
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "Manifest version: ${VERSION}"
+
+      - name: Package extension
+        run: |
+          set -euo pipefail
+          # Zip from inside extension/ so manifest.json sits at the archive root.
+          (cd extension && zip -r -q ../extension.zip .)
+          echo "Package size: $(stat -c%s extension.zip) bytes"
+          unzip -l extension.zip
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
           service_account: ${{ vars.WIF_SA_EMAIL }}
+          # Ask for a plain access token restricted to the Chrome Web Store
+          # scope. This is what replaces the refresh-token dance entirely.
+          token_format: access_token
+          access_token_scopes: https://www.googleapis.com/auth/chromewebstore
 
-      - name: Set up gcloud CLI
-        uses: google-github-actions/setup-gcloud@v2
-
-      - name: Zip extension
+      - name: Upload package
+        id: upload
+        env:
+          # Passed as env rather than inlined into the script, so no expression
+          # value is ever interpolated into the shell source.
+          ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+          PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
+          EXTENSION_ID: ${{ vars.CWS_EXTENSION_ID }}
+          VERSION: ${{ steps.manifest.outputs.version }}
         run: |
-          cd extension
-          zip -r ../extension.zip .
-          echo "Extension zipped: $(du -sh ../extension.zip | cut -f1)"
+          set -euo pipefail
 
-      - name: Get CWS access token
-        id: cws_token
-        run: |
-          REFRESH_TOKEN=$(gcloud secrets versions access latest \
-            --secret="${{ vars.CWS_REFRESH_TOKEN_SECRET }}" \
-            --project="${GOOGLE_CLOUD_PROJECT}")
-          TOKEN=$(curl -s -X POST https://oauth2.googleapis.com/token \
-            -d "client_id=${{ secrets.CWS_CLIENT_ID }}" \
-            -d "client_secret=${{ secrets.CWS_CLIENT_SECRET }}" \
-            -d "refresh_token=${REFRESH_TOKEN}" \
-            -d "grant_type=refresh_token" \
-            | jq -r '.access_token')
-          echo "::add-mask::$TOKEN"
-          echo "token=$TOKEN" >> $GITHUB_OUTPUT
-
-      - name: Upload extension to CWS
-        run: |
-          RESPONSE=$(curl -s -X PUT \
-            "https://www.googleapis.com/upload/chromewebstore/v1.1/items/${{ vars.CWS_EXTENSION_ID }}" \
-            -H "Authorization: Bearer ${{ steps.cws_token.outputs.token }}" \
-            -H "x-goog-api-version: 2" \
-            -T extension.zip)
-          echo "$RESPONSE"
-          STATUS=$(echo "$RESPONSE" | jq -r '.uploadState')
-          if [ "$STATUS" != "SUCCESS" ]; then
-            echo "Upload failed: $STATUS"
+          if [[ -z "${PUBLISHER_ID}" || -z "${EXTENSION_ID}" ]]; then
+            echo "::error::CWS_PUBLISHER_ID and CWS_EXTENSION_ID repository variables must be set"
             exit 1
           fi
 
-      # - name: Publish extension
-      #   run: |
-      #     RESPONSE=$(curl -s -X POST \
-      #       "https://www.googleapis.com/chromewebstore/v1.1/items/${{ vars.CWS_EXTENSION_ID }}/publish" \
-      #       -H "Authorization: Bearer ${{ steps.cws_token.outputs.token }}" \
-      #       -H "x-goog-api-version: 2" \
-      #       -H "Content-Length: 0")
-      #     echo "$RESPONSE"
-      #     STATUS=$(echo "$RESPONSE" | jq -r '.status[0]')
-      #     if [ "$STATUS" != "OK" ]; then
-      #       echo "Publish failed: $STATUS"
-      #       exit 1
-      #     fi
+          BASE="https://chromewebstore.googleapis.com"
+          ITEM="publishers/${PUBLISHER_ID}/items/${EXTENSION_ID}"
+
+          # The reference docs and the field values returned in practice disagree
+          # on the in-progress spelling, so accept either.
+          is_in_progress() {
+            [[ "$1" == "IN_PROGRESS" || "$1" == "UPLOAD_IN_PROGRESS" ]]
+          }
+
+          echo "Uploading version ${VERSION} to ${EXTENSION_ID}..."
+          HTTP=$(curl -sS -o /tmp/upload.json -w '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -T extension.zip \
+            "${BASE}/upload/v2/${ITEM}:upload")
+
+          echo "HTTP ${HTTP}"
+          cat /tmp/upload.json
+          echo
+
+          if [[ "${HTTP}" != "200" ]]; then
+            echo "::error::Upload failed with HTTP ${HTTP}"
+            exit 1
+          fi
+
+          STATE=$(jq -r '.uploadState // empty' /tmp/upload.json)
+
+          # Large packages upload asynchronously; poll until terminal.
+          if is_in_progress "${STATE}"; then
+            for i in $(seq 1 12); do
+              sleep 10
+              FS_HTTP=$(curl -sS -o /tmp/status.json -w '%{http_code}' \
+                -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+                "${BASE}/v2/${ITEM}:fetchStatus")
+              if [[ "${FS_HTTP}" != "200" ]]; then
+                echo "::error::fetchStatus failed with HTTP ${FS_HTTP}"
+                cat /tmp/status.json
+                exit 1
+              fi
+              STATE=$(jq -r '.lastAsyncUploadState // empty' /tmp/status.json)
+              echo "Poll ${i}/12: ${STATE:-<unset>}"
+              is_in_progress "${STATE}" || break
+            done
+          fi
+
+          if is_in_progress "${STATE}"; then
+            echo "::error::Upload still in progress after polling; check the CWS dashboard"
+            exit 1
+          fi
+
+          if [[ "${STATE}" != "SUCCEEDED" ]]; then
+            echo "::error::Upload finished in state '${STATE:-<missing>}'"
+            cat /tmp/upload.json
+            exit 1
+          fi
+
+          echo "state=${STATE}" >> "${GITHUB_OUTPUT}"
+          echo "Uploaded as a draft. Not visible to users."
+
+      - name: Submit for review
+        if: ${{ inputs.submit_for_review }}
+        id: submit
+        env:
+          ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+          PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
+          EXTENSION_ID: ${{ vars.CWS_EXTENSION_ID }}
+        run: |
+          set -euo pipefail
+
+          BASE="https://chromewebstore.googleapis.com"
+          ITEM="publishers/${PUBLISHER_ID}/items/${EXTENSION_ID}"
+
+          # STAGED_PUBLISH holds the item after it passes review so the actual
+          # go-live is a separate, deliberate act. DEFAULT_PUBLISH would push it
+          # to users the moment review completes, with no further checkpoint.
+          HTTP=$(curl -sS -o /tmp/publish.json -w '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '{"publishType":"STAGED_PUBLISH"}' \
+            "${BASE}/v2/${ITEM}:publish")
+
+          echo "HTTP ${HTTP}"
+          cat /tmp/publish.json
+          echo
+
+          if [[ "${HTTP}" != "200" ]]; then
+            echo "::error::Publish request failed with HTTP ${HTTP}"
+            exit 1
+          fi
+
+          STATE=$(jq -r '.state // empty' /tmp/publish.json)
+          jq -e '.warningInfo.warnings // empty' /tmp/publish.json >/dev/null 2>&1 \
+            && echo "::warning::CWS returned warnings; see response above"
+
+          echo "state=${STATE}" >> "${GITHUB_OUTPUT}"
+          echo "Submitted for review (staged publish): ${STATE}"
+
+      - name: Summary
+        if: ${{ always() }}
+        env:
+          VERSION: ${{ steps.manifest.outputs.version }}
+          UPLOAD_STATE: ${{ steps.upload.outputs.state }}
+          SUBMIT_STATE: ${{ steps.submit.outputs.state }}
+          SUBMITTED: ${{ inputs.submit_for_review }}
+          PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
+          EXTENSION_ID: ${{ vars.CWS_EXTENSION_ID }}
+        run: |
+          {
+            echo "## Chrome Web Store upload"
+            echo
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Version | \`${VERSION:-n/a}\` |"
+            echo "| Extension | \`${EXTENSION_ID}\` |"
+            echo "| Publisher | \`${PUBLISHER_ID}\` |"
+            echo "| Upload state | \`${UPLOAD_STATE:-n/a}\` |"
+            echo "| Submitted for review | \`${SUBMITTED}\` |"
+            echo "| Publish state | \`${SUBMIT_STATE:-not requested}\` |"
+            echo "| Static credentials used | none |"
+          } >> "${GITHUB_STEP_SUMMARY}"
