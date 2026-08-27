@@ -12,16 +12,47 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Authenticate to GCP via WIF
-        uses: google-github-actions/auth@v3
+        id: auth
+        uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
           service_account: ${{ vars.WIF_SA_EMAIL }}
+          token_format: access_token
+          scopes: https://www.googleapis.com/auth/chromewebstore
 
-      - name: Set up gcloud CLI
-        uses: google-github-actions/setup-gcloud@v3
+      - name: Zip extension
+        run: |
+          cd extension
+          zip -r ../extension.zip .
+          echo "Extension zipped: $(du -sh ../extension.zip | cut -f1)"
 
-      - name: Confirm authentication
-        run: gcloud auth list
+      - name: Upload extension to CWS
+        run: |
+          RESPONSE=$(curl -s -X PUT \
+            "https://www.googleapis.com/upload/chromewebstore/v1.1/items/${{ vars.CWS_EXTENSION_ID }}" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.access_token }}" \
+            -H "x-goog-api-version: 2" \
+            -T extension.zip)
+          echo "$RESPONSE"
+          STATUS=$(echo "$RESPONSE" | jq -r '.uploadState')
+          if [ "$STATUS" != "SUCCESS" ]; then
+            echo "Upload failed: $STATUS"
+            exit 1
+          fi
+
+      # - name: Publish extension
+      #   run: |
+      #     RESPONSE=$(curl -s -X POST \
+      #       "https://www.googleapis.com/chromewebstore/v1.1/items/${{ vars.CWS_EXTENSION_ID }}/publish" \
+      #       -H "Authorization: Bearer ${{ steps.auth.outputs.access_token }}" \
+      #       -H "x-goog-api-version: 2" \
+      #       -H "Content-Length: 0")
+      #     echo "$RESPONSE"
+      #     STATUS=$(echo "$RESPONSE" | jq -r '.status[0]')
+      #     if [ "$STATUS" != "OK" ]; then
+      #       echo "Publish failed: $STATUS"
+      #       exit 1
+      #     fi

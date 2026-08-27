@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HTTP Warning</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 280px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 13px;
+      color: #1a1a1a;
+      background: #fff;
+    }
+    header {
+      padding: 12px 14px;
+      background: #1e293b;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    header img { width: 20px; height: 20px; }
+    header strong { font-size: 14px; }
+    .status {
+      padding: 16px 14px;
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      border-bottom: 1px solid #e5e7eb;
+    }
+    .icon { font-size: 22px; flex-shrink: 0; }
+    .label { font-weight: 700; font-size: 14px; margin-bottom: 4px; }
+    .detail { color: #4b5563; line-height: 1.5; }
+    .status.insecure .label { color: #b91c1c; }
+    .status.secure .label { color: #15803d; }
+    .url {
+      padding: 8px 14px;
+      background: #f9fafb;
+      font-size: 11px;
+      color: #6b7280;
+      word-break: break-all;
+    }
+    footer {
+      padding: 10px 14px;
+      font-size: 11px;
+      color: #9ca3af;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <img src="icon128.png" alt="">
+    <strong>HTTP Warning</strong>
+  </header>
+  <div class="status" id="status">
+    <span class="icon" id="icon">⏳</span>
+    <div>
+      <div class="label" id="label">Checking…</div>
+      <div class="detail" id="detail"></div>
+    </div>
+  </div>
+  <div class="url" id="url"></div>
+  <footer>HTTP Warning – Insecure Page Detector</footer>
+  <script src="popup.js"></script>
+</body>
+</html>

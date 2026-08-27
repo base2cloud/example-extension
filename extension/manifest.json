@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "HTTP Warning – Insecure Page Detector",
+  "version": "1.0.0",
+  "description": "Displays a visible warning label on any page loaded over HTTP (not HTTPS), helping you spot unencrypted connections before entering sensitive data.",
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "128": "icon128.png"
+    },
+    "default_title": "HTTP Warning"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_end"
+    }
+  ],
+  "permissions": ["tabs"],
+  "host_permissions": ["http://*/*"],
+  "icons": {
+    "128": "icon128.png"
+  }
+}
