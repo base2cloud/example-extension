@@ -160,16 +160,30 @@ must stay identical to the Environment name in GitHub. They are two independent
 systems agreeing on a string; a typo on either side fails the exchange with a
 generic permission error.
 
-## Detection: the CWS status poller
+## Detection: two independent feeds into Sentinel
 
-`poller/` is a Cloud Run Job that snapshots `fetchStatus` into Cloud Logging
-under the log name `cws-status-snapshot`, routed by sink to Pub/Sub and on to
-Sentinel. Diffing consecutive snapshots and joining against STS audit events
-detects a publish that did **not** come through the pipeline.
+Enabling `ADMIN_READ` on `sts.googleapis.com` (above) makes STS write the token
+exchange event, but says nothing about where that event goes afterward — by
+default it just sits in the project's `_Default` log bucket. A sink is what
+actually moves it to Sentinel. There are two sinks, one per feed, each to its
+own topic and subscription, because their payload shapes are unrelated — a
+Google audit log `protoPayload` versus the poller's own `jsonPayload` — and
+Sentinel's GCP connector maps one topic to one table:
 
-The STS log proves a given publish happened through WIF. It cannot prove no
-*other* publish happened. The poller is what closes that gap, by observing the
-listing itself rather than the path used to change it.
+| Sink | Source | Destination |
+|---|---|---|
+| `sts-audit-events` | STS `ExchangeToken` calls | `sts-audit-events` topic |
+| `cws-status-snapshots` | poller's `cws-status-snapshot` log | `cws-status-snapshots` topic |
+
+Neither feed alone proves what the design claims. The STS feed proves a given
+publish went through WIF; it cannot prove no *other* publish happened. The
+poller closes that gap by observing the listing itself — but a diff with
+nothing to join against just shows "the listing changed", not whether that
+change was authorized. Sentinel's KQL rule needs both tables to do the join the
+design describes.
+
+`poller/` is the Cloud Run Job behind the second feed: it snapshots `fetchStatus`
+on a schedule and logs the result under `cws-status-snapshot`.
 
 It authenticates with `chromewebstore.readonly`. Per the v2 discovery document
 only `fetchStatus` accepts that scope — `upload`, `publish`, `cancelSubmission`
