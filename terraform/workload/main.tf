@@ -18,11 +18,15 @@ data "google_project" "this" {
 # claimed by two states.
 resource "google_project_service" "required" {
   for_each = toset([
-    "iam.googleapis.com",            # service accounts and WIF pools
-    "iamcredentials.googleapis.com", # short-lived token minting
-    "sts.googleapis.com",            # WIF token exchange
-    "chromewebstore.googleapis.com", # CWS v2 publishing API
-    "logging.googleapis.com",        # STS audit trail
+    "iam.googleapis.com",              # service accounts and WIF pools
+    "iamcredentials.googleapis.com",   # short-lived token minting
+    "sts.googleapis.com",              # WIF token exchange
+    "chromewebstore.googleapis.com",   # CWS v2 publishing API
+    "logging.googleapis.com",          # STS audit trail
+    "run.googleapis.com",              # poller job
+    "cloudscheduler.googleapis.com",   # poller schedule
+    "artifactregistry.googleapis.com", # poller image
+    "pubsub.googleapis.com",           # snapshot export to Sentinel
   ])
 
   project = var.project_id
