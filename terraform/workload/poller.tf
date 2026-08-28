@@ -222,11 +222,21 @@ resource "google_pubsub_topic" "cws_snapshots" {
 # Matches both cws_status_snapshot and cws_status_poll_failed: the poller writes
 # both to the same log name, and the failure events are as important to the
 # detection as the successful snapshots.
+#
+# The event_type guard drops the diagnostic entry google-cloud-logging writes
+# under the same log name, which otherwise reaches Sentinel as an untyped
+# message. Testing for presence rather than listing known values on purpose: an
+# enumeration would silently stop exporting any event type added later, and a
+# detection pipeline should fail noisy rather than quiet.
 resource "google_logging_project_sink" "cws_snapshots" {
   project     = var.project_id
   name        = "cws-status-snapshots"
   destination = "pubsub.googleapis.com/${google_pubsub_topic.cws_snapshots.id}"
-  filter      = "logName=\"projects/${var.project_id}/logs/cws-status-snapshot\""
+
+  filter = join(" AND ", [
+    "logName=\"projects/${var.project_id}/logs/cws-status-snapshot\"",
+    "jsonPayload.event_type:*",
+  ])
 
   # Give the sink its own writer identity rather than the shared, broadly
   # privileged default log writer.
