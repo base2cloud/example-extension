@@ -9,6 +9,31 @@ variable "region" {
   default     = "australia-southeast1"
 }
 
+variable "cws_publisher_id" {
+  description = "Chrome Web Store publisher ID, from Publisher > Settings in the dashboard."
+  type        = string
+}
+
+variable "cws_extension_id" {
+  description = "Chrome Web Store extension (item) ID."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-p]{32}$", var.cws_extension_id))
+    error_message = "cws_extension_id must be 32 characters in the range a-p."
+  }
+}
+
+variable "poller_schedule" {
+  description = <<-EOT
+    Cron schedule for the status poller, in UTC. This sets detection
+    resolution: a change made and reverted between two polls is never
+    observed, so it is a threat-model decision rather than a cost one.
+  EOT
+  type        = string
+  default     = "*/5 * * * *"
+}
+
 variable "github_repository" {
   description = "Repository allowed to federate into this project, as owner/repo."
   type        = string

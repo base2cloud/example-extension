@@ -1,0 +1,89 @@
+name: Build poller image
+
+# Builds the CWS status poller container and pushes it to Artifact Registry.
+#
+# Same credential model as the publish workflow: GitHub OIDC is exchanged for a
+# short-lived Google token via WIF. No service account key, no registry
+# password. The identity used here (cws-image-publisher) can write to one
+# Artifact Registry repository and nothing else - in particular it has no
+# Chrome Web Store access, so a compromised build cannot publish the extension.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "poller/**"
+      - ".github/workflows/build-poller.yaml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: build-poller
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and push
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # The WIF condition requires assertion.environment, so this job needs an
+    # environment just as the publish job does.
+    environment: prd
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.IMAGE_PUBLISHER_SA_EMAIL }}
+          token_format: access_token
+
+      - name: Log in to Artifact Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ vars.POLLER_IMAGE_REGISTRY }}
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ./poller
+          push: true
+          # Immutable tag alongside :latest. The Cloud Run Job pulls :latest and
+          # re-resolves it each execution, but the SHA tag means any execution
+          # can still be traced back to the commit that produced it.
+          tags: |
+            ${{ vars.POLLER_IMAGE }}:latest
+            ${{ vars.POLLER_IMAGE }}:${{ github.sha }}
+          provenance: true
+          sbom: true
+
+      - name: Summary
+        if: ${{ always() }}
+        env:
+          IMAGE: ${{ vars.POLLER_IMAGE }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          SHA: ${{ github.sha }}
+        run: |
+          {
+            echo "## Poller image"
+            echo
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Image | \`${IMAGE}\` |"
+            echo "| Tags | \`latest\`, \`${SHA}\` |"
+            echo "| Digest | \`${DIGEST:-n/a}\` |"
+            echo "| Picked up by | next Cloud Run Job execution (within 5 min) |"
+          } >> "${GITHUB_STEP_SUMMARY}"
