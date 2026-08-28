@@ -17,3 +17,9 @@ terraform.rc
 
 # terraform.tfvars is committed on purpose: it holds only the project id and
 # region. Anything sensitive goes into Secret Manager, never a tfvars file.
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/

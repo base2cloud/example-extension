@@ -160,6 +160,40 @@ must stay identical to the Environment name in GitHub. They are two independent
 systems agreeing on a string; a typo on either side fails the exchange with a
 generic permission error.
 
+## Detection: the CWS status poller
+
+`poller/` is a Cloud Run Job that snapshots `fetchStatus` into Cloud Logging
+under the log name `cws-status-snapshot`, routed by sink to Pub/Sub and on to
+Sentinel. Diffing consecutive snapshots and joining against STS audit events
+detects a publish that did **not** come through the pipeline.
+
+The STS log proves a given publish happened through WIF. It cannot prove no
+*other* publish happened. The poller is what closes that gap, by observing the
+listing itself rather than the path used to change it.
+
+It authenticates with `chromewebstore.readonly`. Per the v2 discovery document
+only `fetchStatus` accepts that scope — `upload`, `publish`, `cancelSubmission`
+and `setPublishedDeployPercentage` all require the full `chromewebstore` scope.
+So a token minted by the poller cannot alter the listing. Note this is a
+workload-level control: the scope is chosen at token-request time and no IAM
+condition constrains it, so it bounds the blast radius of a bug rather than
+containing a fully compromised container.
+
+### Two alerting rules are required, not one
+
+- **Change detection** — consecutive snapshots differ without a corresponding
+  STS exchange.
+- **Staleness** — no snapshot received within N intervals.
+
+The second is not optional. Every poller error emits a
+`cws_status_poll_failed` event rather than exiting silently, but a job that
+never starts emits nothing at all. Without a staleness rule, killing the poller
+silently disables the detection, and absence of alerts reads as "no changes".
+
+Detection resolution is bounded by the poll interval: a change made and
+reverted between two polls is invisible. That makes the schedule a
+threat-model decision, not a cost one.
+
 ## Conventions
 
 - **No secrets anywhere.** Not in Terraform, not in GitHub, not in Secret
